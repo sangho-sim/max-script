@@ -15,6 +15,7 @@ global RA_lastSnapCount = 0
 global ra_syncUI
 global ra_startDraw
 global RA_ScriptDir = try (getFilenamePath (getThisScriptFilename())) catch undefined
+global RA_ScanNode
 
 if RA_drawCB != undefined do (try (unregisterRedrawViewsCallback RA_drawCB) catch ())
 
@@ -68,7 +69,15 @@ struct RA_State
 	flowDir = undefined,      -- 흐름 재구성: 엣지 줄이 따를 방향
 	extDirs = undefined,      -- 고르게 재구성: 경계 점마다 주변에서 들어오는 엣지 방향 (그 흐름을 이어 감)
 	lastMsg = "",             -- 영역 선택/흐름 재구성 결과 메시지
-	nextMode = 0              -- 다음 선 한 번만 이 방식으로 (5 컷 / 7 영역 선택 / 8 흐름 재구성), 0 = 없음
+	nextMode = 0,             -- 다음 선 한 번만 이 방식으로 (5 컷 / 7 영역 선택 / 8 흐름 재구성), 0 = 없음
+	scanSharp = true,         -- 스캔: 모서리(꺾인 엣지·판 가장자리·뾰족한 끝) 살리기
+	scanAngle = 35.0,         -- 스캔: 이 각도 이상 꺾인 엣지를 모서리로
+	scanPureQuad = true,      -- 스캔: 전부 쿼드 (끄면 삼각형이 조금 섞인 쿼드 위주)
+	scanDelBack = true,       -- 스캔: 두께 없는 판(열린 면)의 뒷면 지우기
+	scanTarget = 0,           -- 스캔: 목표 면 수 (0 = 엣지 길이 사용)
+	guideMode = false,        -- 가이드 선 그리기 중 (선이 메쉬가 되지 않고 스캔 재구성 가이드로 남음)
+	scanGuides = #(),         -- #(#(점들, 법선들), ...) 스캔 결과 위에 그은 가이드 선
+	guideColor = (color 255 40 200)
 )
 RA_S = RA_State()
 
@@ -380,7 +389,9 @@ fn ra_rayHit r =
 (
 	local best = undefined
 	local bd = 1e30
-	for n in ra_targets() do
+	-- 가이드 선은 스캔 결과 메쉬 위에 그음
+	local nodes = if RA_S.guideMode and isValidNode RA_ScanNode then #(RA_ScanNode) else ra_targets()
+	for n in nodes do
 	(
 		local h = intersectRay n r
 		if h != undefined do
@@ -2507,7 +2518,8 @@ fn ra_columnHits n x y z0 z1 step =
 )
 
 -- 여러 오브젝트 표면을 스캔해 하나로 합친 고른 쿼드 메쉬 (복셀 방식: 안쪽 공간을 격자로 채우고 겉면을 쿼드로)
-fn ra_scanMerge nodes =
+-- RAKeys.dll 의 빠른 엔진(RAQuad)을 못 쓸 때만 쓰는 예전 방식 (느림)
+fn ra_scanMergeVoxel nodes =
 (
 	local src = for n in nodes where isValidNode n and superClassOf n == GeometryClass and classOf n != Targetobject and \
 		not (isValidNode RA_S.retopo and n == RA_S.retopo) and not (matchPattern n.name pattern:"Retopo*") collect n
@@ -2714,6 +2726,259 @@ fn ra_scanMerge nodes =
 		m.backfacecull = false
 		#(m, "스캔 합치기: 오브젝트 " + src.count as string + "개 → 쿼드 " + (polyop.getNumFaces m) as string + "개 (칸 크기 " + vs as string + ")")
 	)
+)
+
+-- 빠른 엔진: RAKeys.dll 안의 RAQuad (복셀로 합친 껍질 → 방향장 쿼드 리메쉬 → 원래 표면·모서리에 맞춤)
+global RA_QuadAsm
+fn ra_quadEngine =
+(
+	if RA_QuadAsm == undefined and RA_ScriptDir != undefined and doesFileExist (RA_ScriptDir + "RAKeys.dll") do
+		RA_QuadAsm = try (dotNet.loadAssembly (RA_ScriptDir + "RAKeys.dll")) catch undefined
+	if RA_QuadAsm == undefined then undefined
+	else try (RA_QuadAsm.CreateInstance "RAQuad") catch undefined
+)
+
+-- .NET 배열 → MAXScript 배열 (이미 변환돼 오면 그대로)
+fn ra_netArr a =
+(
+	if classOf a == Array then a
+	else
+	(
+		local n = a.Length
+		local r = #()
+		if n > 0 do r[n] = undefined
+		for i = 0 to n - 1 do r[i + 1] = a.GetValue i
+		r
+	)
+)
+
+fn ra_scanSource nodes =
+(
+	for n in nodes where isValidNode n and superClassOf n == GeometryClass and classOf n != Targetobject and \
+		not (isValidNode RA_S.retopo and n == RA_S.retopo) and not (matchPattern n.name pattern:"Retopo*") collect n
+)
+
+-- 방금 스캔한 결과: 엔진(입력 메쉬를 들고 있음)과 만든 노드. 면 수를 바꿔 다시 만들 때 오브젝트를 다시 읽지 않음
+global RA_ScanQ
+global RA_ScanNode
+global RA_ScanFaces = 0
+
+-- 엔진 결과로 Editable Poly 노드 만들기
+fn ra_scanBuildNode q =
+(
+	local vs = ra_netArr (q.GetVerts())
+	local ts = ra_netArr (q.GetTris())
+	local hid = ra_netArr (q.GetTriHidden())
+	local pts = for i = 1 to vs.count by 3 collect [vs[i], vs[i + 1], vs[i + 2]]
+	local fcs = for i = 1 to ts.count by 3 collect [ts[i], ts[i + 1], ts[i + 2]]
+	local m = mesh vertices:pts faces:fcs
+	-- 쿼드(n각형)를 이루는 삼각형 사이 엣지는 숨겨 Editable Poly 로 바꿀 때 하나의 면이 되게
+	for f = 1 to fcs.count do
+	(
+		local b = hid[f]
+		if b != 0 do
+		(
+			if (bit.and b 1) != 0 do setEdgeVis m f 1 false
+			if (bit.and b 2) != 0 do setEdgeVis m f 2 false
+			if (bit.and b 4) != 0 do setEdgeVis m f 3 false
+		)
+	)
+	update m
+	convertTo m PolyMeshObject
+	m.wirecolor = color 40 160 255
+	m.xray = true
+	m.backfacecull = false
+	m
+)
+
+fn ra_scanFlags =
+(
+	local flags = 0
+	if RA_S.scanPureQuad do flags += 1
+	if RA_S.scanSharp do flags += 2
+	if not RA_S.scanDelBack do flags += 4
+	flags
+)
+
+fn ra_scanMerge nodes =
+(
+	local src = ra_scanSource nodes
+	local q = if src.count > 0 then ra_quadEngine() else undefined
+	if src.count == 0 then #(undefined, "스캔할 오브젝트를 선택하세요")
+	else if q == undefined then
+	(
+		format "[RetopoAnnotate] RAKeys.dll 의 RAQuad 를 불러오지 못해 예전(느린) 스캔을 씁니다\n"
+		ra_scanMergeVoxel nodes
+	)
+	else
+	(
+		local t0 = timeStamp()
+		local nTri = 0
+		local sgl = dotNetClass "System.Single[]"
+		local i32 = dotNetClass "System.Int32[]"
+		for n in src do
+		(
+			local m = try (snapshotAsMesh n) catch undefined
+			if m != undefined do
+			(
+				local nv = m.numverts
+				local nf = m.numfaces
+				if nv > 0 and nf > 0 do
+				(
+					local xyz = #()
+					xyz[nv * 3] = 0.0
+					for i = 1 to nv do
+					(
+						local p = getVert m i
+						local b = i * 3
+						xyz[b - 2] = p.x; xyz[b - 1] = p.y; xyz[b] = p.z
+					)
+					local tri = #()
+					tri[nf * 3] = 0
+					for i = 1 to nf do
+					(
+						local f = getFace m i
+						local b = i * 3
+						tri[b - 2] = (f.x as integer) - 1; tri[b - 1] = (f.y as integer) - 1; tri[b] = (f.z as integer) - 1
+					)
+					q.AddMesh (dotNet.ValueToDotNetObject xyz sgl) (dotNet.ValueToDotNetObject tri i32)
+					nTri += nf
+				)
+				free m
+			)
+		)
+		local t1 = timeStamp()
+		q.TargetFaces = RA_S.scanTarget
+		local res = q.Run RA_S.spacing RA_S.scanAngle (ra_scanFlags()) 0
+		format "[RetopoAnnotate] 스캔 엔진 로그\n%" (q.GetLog())
+		if res != "OK" then #(undefined, "스캔 실패: " + res)
+		else
+		(
+			local t2 = timeStamp()
+			local m = ra_scanBuildNode q
+			m.name = uniqueName "Retopo_Scan_"
+			(LayerManager.getLayer 0).addNode m
+			RA_ScanQ = q
+			RA_ScanNode = m
+			RA_S.scanGuides = #()
+			RA_ScanFaces = polyop.getNumFaces m
+			local tEnd = timeStamp()
+			#(m, "스캔 합치기: 오브젝트 " + src.count as string + "개 (삼각형 " + nTri as string + ") → 면 " + RA_ScanFaces as string + \
+				"  [읽기 " + ((t1 - t0) / 1000.0) as string + "s · 계산 " + ((t2 - t1) / 1000.0) as string + "s · 생성 " + ((tEnd - t2) / 1000.0) as string + "s]" + \
+				"  — +/−, Alt+휠, '스캔 목표 면 수' 로 면 수 조절")
+		)
+	)
+)
+
+-- 방금 스캔한 메쉬를 면 수만 바꿔 다시 만들 수 있는지 (그 뒤 메쉬를 고치지 않았을 때)
+fn ra_canAdjustScan =
+(
+	RA_ScanQ != undefined and isValidNode RA_ScanNode and RA_ScanNode == RA_S.retopo and (ra_isPoly RA_ScanNode) and \
+		(polyop.getNumFaces RA_ScanNode) == RA_ScanFaces
+)
+
+-- 스캔 결과를 목표 면 수 faces 로 다시 만들어 같은 자리에 바꿔 넣음
+fn ra_scanRebuild faces =
+(
+	if not (ra_canAdjustScan()) then false
+	else
+	(
+		local q = RA_ScanQ
+		local old = RA_ScanNode
+		q.TargetFaces = if faces > 0 then (amax 8 faces) else 0
+		local res = q.Run RA_S.spacing RA_S.scanAngle (ra_scanFlags()) 0
+		if res != "OK" then (format "[RetopoAnnotate] %\n%" res (q.GetLog()); displayTempPrompt ("스캔 다시 만들기 실패: " + res) 4000; false)
+		else
+		(
+			local m
+			undo "Retopo 스캔 면 수" on
+			(
+				m = ra_scanBuildNode q
+				m.name = old.name
+				m.wirecolor = old.wirecolor
+				m.xray = old.xray
+				try (old.layer.addNode m) catch ()
+				local wasSel = old.isSelected
+				delete old
+				if wasSel do selectMore m
+			)
+			RA_ScanNode = m
+			RA_S.retopo = m
+			RA_ScanFaces = polyop.getNumFaces m
+			RA_S.scanTarget = faces
+			ra_syncUI()
+			if not (GetQuietMode()) do displayTempPrompt ("스캔 결과 면 " + RA_ScanFaces as string + \
+				(if faces > 0 then (" (목표 " + faces as string + ")") else "") + \
+				(if q.GuideCount > 0 then (" · 가이드 선 " + q.GuideCount as string + "개") else "")) 3000
+			redrawViews()
+			true
+		)
+	)
+)
+
+-- 그은 가이드 선을 엔진에 넣고 스캔 결과를 다시 만듦 (엣지 루프가 가이드 선을 따라감)
+fn ra_scanApplyGuides =
+(
+	if not (ra_canAdjustScan()) then
+	(
+		messageBox "가이드로 다시 만들 스캔 결과가 없습니다.\n[스캔 → 합친 메쉬] 로 만든 메쉬(그 뒤 고치지 않은 것)에 가이드 선을 그은 뒤 누르세요." title:"Retopo"
+		false
+	)
+	else
+	(
+		local q = RA_ScanQ
+		local sgl = dotNetClass "System.Single[]"
+		q.ClearGuides()
+		for g in RA_S.scanGuides where g[1].count >= 2 do
+		(
+			local xyz = #()
+			local nrm = #()
+			for i = 1 to g[1].count do
+			(
+				local p = g[1][i]
+				local n = if g[2] != undefined and g[2][i] != undefined then g[2][i] else [0, 0, 0]
+				join xyz #(p.x, p.y, p.z)
+				join nrm #(n.x, n.y, n.z)
+			)
+			q.AddGuide (dotNet.ValueToDotNetObject xyz sgl) (dotNet.ValueToDotNetObject nrm sgl)
+		)
+		ra_scanRebuild RA_S.scanTarget
+	)
+)
+
+fn ra_scanClearGuides =
+(
+	RA_S.scanGuides = #()
+	-- 엔진에도 가이드가 있었으면 가이드 없이 다시 만듦
+	if RA_ScanQ != undefined and RA_ScanQ.GuideCount > 0 do
+	(
+		RA_ScanQ.ClearGuides()
+		ra_scanRebuild RA_S.scanTarget
+	)
+	redrawViews()
+)
+
+-- 가이드 선 그리기 시작 (우클릭으로 끝남)
+fn ra_drawGuides =
+(
+	if not (isValidNode RA_ScanNode) or RA_ScanQ == undefined then
+		messageBox "먼저 [스캔 → 합친 메쉬] 로 메쉬를 만드세요. 가이드 선은 그 메쉬 위에 긋습니다." title:"Retopo"
+	else if not RA_S.tracking do
+	(
+		RA_S.guideMode = true
+		RA_S.retopo = RA_ScanNode
+		displayTempPrompt "가이드 선: 원하는 엣지 흐름을 따라 그으세요 (우클릭 = 끝, Ctrl+Z = 마지막 선 지우기) → [가이드로 다시 만들기]" 8000
+		try (ra_startDraw()) catch (format "[RetopoAnnotate] %\n" (getCurrentException()))
+		RA_S.guideMode = false
+		redrawViews()
+	)
+)
+
+-- +/− , Alt+휠: 한 칸에 면 수 약 1.3배 / ÷1.3
+fn ra_scanAdjust step =
+(
+	local cur = if RA_S.scanTarget > 0 then RA_S.scanTarget else RA_ScanFaces
+	ra_scanRebuild ((ra_round (cur * (1.3 ^ step))) as integer)
 )
 
 -- ---------------------------------------------------------------------------
@@ -3656,10 +3921,11 @@ fn ra_drawCBfn =
 	if RA_S != undefined do
 	(
 		gw.setTransform (matrix3 1)
-		if RA_S.curPts.count > 1 do (gw.setColor #line RA_S.strokeColor; ra_drawPoly RA_S.curPts)
+		if RA_S.curPts.count > 1 do (gw.setColor #line (if RA_S.guideMode then RA_S.guideColor else RA_S.strokeColor); ra_drawPoly RA_S.curPts)
 		if RA_S.showPending do for s in RA_S.pending do (gw.setColor #line RA_S.pendingColor; ra_drawPoly s[1])
 		if RA_S.showPending and RA_S.pendingRing != undefined do (gw.setColor #line RA_S.pendingColor; gw.polyline RA_S.pendingRing true)
-		if RA_S.showConnect and RA_S.tracking do
+		for g in RA_S.scanGuides do (gw.setColor #line RA_S.guideColor; ra_drawPoly g[1])
+		if RA_S.showConnect and RA_S.tracking and not RA_S.guideMode do
 		(
 			if RA_S.drawing and RA_S.curPts.count > 0 then
 			(
@@ -3704,7 +3970,8 @@ fn ra_endStroke =
 			(
 				-- 형태 밖에서 시작해 가로질러 밖에서 끝난 선 = 컨투어
 				local isContour = RA_S.nextMode == 0 and (RA_S.mode == 1 or RA_S.mode == 6) and view != undefined and ra_isContourFlags onF
-				if isContour then ra_processContour pts view
+				if RA_S.guideMode then append RA_S.scanGuides #(pts, nrms)
+				else if isContour then ra_processContour pts view
 				else if RA_S.mode != 6 or RA_S.nextMode > 0 do ra_processStroke pts nrms
 			)
 			catch (format "[RetopoAnnotate] %\n" (getCurrentException()))
@@ -3730,7 +3997,7 @@ fn ra_addScreen =
 		(
 			append RA_S.curPts p
 			append RA_S.curNrm nn
-			if RA_S.showConnect do
+			if RA_S.showConnect and not RA_S.guideMode do
 			(
 				local cp = RA_S.curPts
 				local m = cp.count
@@ -3745,7 +4012,7 @@ fn ra_addScreen =
 -- 그리기 모드에서 버튼을 누르지 않고 움직일 때: 커서 위치가 이어지는 곳인지 미리 표시
 fn ra_updateHover =
 (
-	if RA_S.showConnect do
+	if RA_S.showConnect and not RA_S.guideMode do
 	(
 		local h = ra_rayHit (mapScreenToWorldRay mouse.pos)
 		if h != undefined then (RA_S.hoverPt = h.pos; RA_S.hoverInfo = ra_connectAt h.pos)
@@ -3783,7 +4050,7 @@ fn ra_trackCB msg ir obj faceNum shift ctrl alt =
 
 fn ra_startDraw =
 (
-	if not (ra_hasTarget()) then messageBox "타겟(하이폴리) 오브젝트나 레이어를 먼저 지정하세요" title:"Retopo"
+	if not (ra_hasTarget()) and not (RA_S.guideMode and isValidNode RA_ScanNode) then messageBox "타겟(하이폴리) 오브젝트나 레이어를 먼저 지정하세요" title:"Retopo"
 	else
 	(
 		if not ra_isPoly RA_S.retopo do ra_setupRetopo()
@@ -3918,7 +4185,8 @@ fn ra_canAdjust =
 -- Alt+휠 / 버튼: 방금 만든 결과의 밀도(what #density) 또는 스트립 폭(#width) 한 단계
 fn ra_adjustLast what step =
 (
-	if not (ra_canAdjust()) then
+	if what == #density and not (ra_canAdjust()) and (ra_canAdjustScan()) then ra_scanAdjust step
+	else if not (ra_canAdjust()) then
 	(
 		if not (GetQuietMode()) do displayTempPrompt "조절할 결과가 없습니다 — 주석으로 방금 만든 결과에만 적용 (그 뒤 고치거나 되돌렸다면 새로 그은 뒤)" 4000
 		false
@@ -3955,7 +4223,7 @@ fn ra_keyTick =
 	local k = ra_initKeys()
 	if k != undefined do
 	(
-		k.Armed = ra_canAdjust()
+		k.Armed = ra_canAdjust() or ra_canAdjustScan()
 		-- Alt+휠 / Shift+Alt+휠
 		local w = k.TakeWheel()
 		local ws = k.TakeWheelShift()
@@ -3970,12 +4238,14 @@ fn ra_keyTick =
 		(
 			if p == 1 then
 			(
+				-- 가이드 선 그리는 중이면 마지막 가이드 선을 지움
+				if RA_S.guideMode then (if RA_S.scanGuides.count > 0 do RA_S.scanGuides = for i = 1 to RA_S.scanGuides.count - 1 collect RA_S.scanGuides[i])
 				-- 아직 메쉬가 안 된 대기 선이 있으면 그 선부터 지움
-				if RA_S.pending.count > 0 then RA_S.pending = for i = 1 to RA_S.pending.count - 1 collect RA_S.pending[i]
+				else if RA_S.pending.count > 0 then RA_S.pending = for i = 1 to RA_S.pending.count - 1 collect RA_S.pending[i]
 				else if RA_S.pendingRing != undefined then RA_S.pendingRing = undefined
 				else (RA_S.ringVerts = undefined; RA_S.lastRec = undefined; max undo)
 			)
-			else (RA_S.ringVerts = undefined; RA_S.lastRec = undefined; max redo)
+			else if not RA_S.guideMode do (RA_S.ringVerts = undefined; RA_S.lastRec = undefined; max redo)
 			RA_S.flash = undefined
 			RA_S.hoverInfo = undefined
 			redrawViews()
@@ -4136,6 +4406,12 @@ rollout RA_Rollout "시작 · 그리기"
 	label lbTarget "타겟: 없음" align:#left
 	button btnSetup "리토폴로지 시작" width:116 height:26 across:2
 	button btnScan "스캔 → 합친 메쉬" width:116 height:26
+	spinner spScanTarget "스캔 목표 면 수 (0=엣지 길이)" range:[0, 2000000, 0] type:#integer fieldwidth:60 align:#right
+	checkbox ckScanSharp "스캔: 모서리 살리기" checked:true across:2
+	checkbox ckScanQuad "전부 쿼드" checked:true offset:[20, 0]
+	checkbutton ckGuide "가이드 선 그리기" width:116 across:2 tooltip:"스캔 결과 위에 원하는 엣지 흐름을 그음 (우클릭 = 끝)"
+	button btnGuideApply "가이드로 다시 만들기" width:116 tooltip:"그은 가이드 선을 따라 스캔 메쉬 토폴로지를 다시 만듦"
+	button btnGuideClear "가이드 지우기" width:236
 	button btnUseSel "선택한 Editable Poly를 리토 메쉬로" width:236
 	dropdownlist ddMode "그리기 방식" items:#("자동", "스트립", "도형 채우기", "두 선 사이", "컷", "컨투어", "영역 선택", "흐름 재구성") width:236
 	spinner spSpacing "엣지 길이" range:[0.0001, 1e6, 5] type:#worldunits fieldwidth:60 across:3 align:#left
@@ -4181,6 +4457,22 @@ rollout RA_Rollout "시작 · 그리기"
 		ra_syncUI()
 	)
 	on btnScan pressed do ra_doScan()
+	on spScanTarget changed v inSpin do
+	(
+		RA_S.scanTarget = v
+		-- 값을 입력(Enter)했을 때만 바로 다시 만듦. 화살표를 끄는 동안은 놓을 때(buttonup)
+		if not inSpin and v > 0 do ra_scanRebuild v
+	)
+	on spScanTarget buttonup do (if RA_S.scanTarget > 0 do ra_scanRebuild RA_S.scanTarget)
+	on ckScanSharp changed st do RA_S.scanSharp = st
+	on ckScanQuad changed st do RA_S.scanPureQuad = st
+	on ckGuide changed st do
+	(
+		if st do ra_drawGuides()
+		ckGuide.checked = false
+	)
+	on btnGuideApply pressed do ra_scanApplyGuides()
+	on btnGuideClear pressed do ra_scanClearGuides()
 	on btnUseSel pressed do
 	(
 		if selection.count == 1 and ra_isPoly selection[1] then (RA_S.retopo = selection[1]; ra_enableAutoFill RA_S.autoFill)
@@ -4280,6 +4572,8 @@ rollout RA_AdvRO "고급 설정"
 	button btnFill4 "지금 채우기" width:80 offset:[20, -2]
 	spinner spCreaseR "주름: 합치기 거리" range:[0, 0.49, 0.35] type:#float scale:0.01
 	checkbox ckCreaseClosed "주름: 처음·끝 잇기" checked:false
+	spinner spScanAngle "스캔: 모서리 각도" range:[5, 170, 35] type:#float fieldwidth:50
+	checkbox ckScanDelBack "스캔: 두께 없는 판 뒷면 지우기" checked:true
 
 	on rbDensity changed st do (RA_S.densityMode = st; ra_redoLast())
 	on spU changed v do (RA_S.countU = v; if RA_S.densityMode == 2 do ra_redoLast())
@@ -4303,6 +4597,8 @@ rollout RA_AdvRO "고급 설정"
 	)
 	on spCreaseR changed v do RA_S.creaseRatio = v
 	on ckCreaseClosed changed st do RA_S.creaseClosed = st
+	on spScanAngle changed v do RA_S.scanAngle = v
+	on ckScanDelBack changed st do RA_S.scanDelBack = st
 )
 
 rollout RA_KeysRO "단축키"
@@ -4325,6 +4621,9 @@ fn ra_syncUI =
 		(
 			RA_Rollout.spSpacing.value = RA_S.spacing
 			RA_Rollout.spStripW.value = RA_S.stripWidth
+			RA_Rollout.spScanTarget.value = RA_S.scanTarget
+			RA_Rollout.ckScanSharp.checked = RA_S.scanSharp
+			RA_Rollout.ckScanQuad.checked = RA_S.scanPureQuad
 			RA_Rollout.ddMode.selection = RA_S.mode
 			if isValidNode RA_S.target do RA_Rollout.pbTarget.text = RA_S.target.name
 			local n = (ra_targets()).count
@@ -4348,6 +4647,8 @@ fn ra_syncUI =
 			RA_AdvRO.spRelax.value = RA_S.relaxIters
 			RA_AdvRO.ckAuto.checked = RA_S.autoFill
 			RA_AdvRO.ckCrease.checked = RA_S.snapCreases
+			RA_AdvRO.spScanAngle.value = RA_S.scanAngle
+			RA_AdvRO.ckScanDelBack.checked = RA_S.scanDelBack
 			RA_AdvRO.ckRedo.checked = RA_S.redoOnChange
 		)
 	)
