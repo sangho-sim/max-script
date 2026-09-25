@@ -70,6 +70,7 @@ public class RAQuad
 	public int PosIters = 12;
 	public int RelaxIters = 6;
 	public double MinCreaseLen = 1.5;
+	public int TargetFaces = 0;          // 0 보다 크면 엣지 길이 대신 목표 면 수로
 	public bool SnapToCrease = false;    // 모서리 버텍스를 가장 가까운 날카로운 엣지로 (두꺼운 모서리용)    // 이 길이(엣지 길이 배수)보다 짧은 모서리 선은 무시
 
 	// flags
@@ -96,6 +97,24 @@ public class RAQuad
 			inTriObj.Add(objCount);
 		}
 		return objCount++;
+	}
+
+	// 가이드 선 (주석): 점들 (x,y,z 반복) 과 그 점의 표면 법선. 엣지 루프가 이 선을 따라가게 함
+	readonly List<RV[]> guides = new List<RV[]>();
+	readonly List<RV[]> guideN = new List<RV[]>();
+	public void ClearGuides() { guides.Clear(); guideN.Clear(); }
+	public int GuideCount { get { return guides.Count; } }
+	public void AddGuide(float[] xyz, float[] nrm)
+	{
+		int n = xyz.Length / 3;
+		if (n < 2) return;
+		var p = new RV[n]; var nn = new RV[n];
+		for (int i = 0; i < n; i++)
+		{
+			p[i] = new RV(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]);
+			nn[i] = (nrm != null && nrm.Length >= xyz.Length) ? new RV(nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2]).Norm() : RV.Zero;
+		}
+		guides.Add(p); guideN.Add(nn);
 	}
 
 	public int AddMeshD(double[] xyz, int[] tris)
@@ -137,11 +156,19 @@ public class RAQuad
 		{
 			if (inTri.Count == 0) return "입력 메쉬가 없습니다";
 			bool pure = (flags & F_PureQuad) != 0;
-			L = edge;
-			Prepare(sharpDeg, (flags & F_Sharp) != 0);
+			if (maxVox <= 0) maxVox = 16000000;
+			PrepareInput();
 			Note(string.Format("입력: 오브젝트 {0}  삼각형 {1}", objCount, nT));
+			L = edge;
+			if (TargetFaces > 0)
+			{
+				L = EstimateEdge(TargetFaces, Math.Min(maxVox, 4000000));
+				Note(string.Format("목표 면 {0} → 엣지 길이 {1:0.####}", TargetFaces, L));
+			}
+			if (!(L > 0)) return "엣지 길이가 0 입니다";
+			PrepareSharp(sharpDeg, (flags & F_Sharp) != 0);
 			h = L * VoxelRatio;
-			if (!BuildGrid(maxVox <= 0 ? 24000000 : maxVox)) return "격자를 만들 수 없습니다";
+			if (!BuildGrid(maxVox)) return "격자를 만들 수 없습니다";
 			Note(string.Format("격자 {0}x{1}x{2} (칸 {3:0.####})", nx, ny, nz, h));
 			ComputeDistance();
 			Note("거리장");
@@ -152,6 +179,7 @@ public class RAQuad
 			if (snV.Length < 8) return "표면을 찾지 못했습니다 (엣지 길이가 너무 큽니다)";
 			D = null; outside = null; // NT 는 투영에 계속 사용
 			TagFeatures((flags & F_Sharp) != 0, sharpDeg);
+			if (guides.Count > 0) Note(string.Format("가이드 선 {0}개 → 버텍스 {1}", guides.Count, TagGuides()));
 			Note(string.Format("모서리 버텍스 {0}", CountTagged()));
 			double scale = L;
 			BuildHierarchy();
@@ -185,10 +213,36 @@ public class RAQuad
 		else for (int i = 0; i < n; i++) body(i);
 	}
 
+	// 목표 면 수 → 엣지 길이: 거친 격자로 합친 껍질 넓이를 재서 넓이/면 수
+	double EstimateEdge(int target, int maxVox)
+	{
+		double area = 0;
+		for (int t = 0; t < nT; t++)
+			area += (P[T[t * 3 + 1]] - P[T[t * 3]]).Cross(P[T[t * 3 + 2]] - P[T[t * 3]]).Len * 0.5;
+		L = Math.Sqrt(area / target);
+		for (int pass = 0; pass < 2; pass++)
+		{
+			h = L * VoxelRatio;
+			if (!BuildGrid(maxVox)) break;
+			ComputeDistance();
+			FloodOutside();
+			BuildSurfaceNet();
+			double a = 0;
+			for (int q = 0; q < snQ.Length; q += 4)
+				a += (snV[snQ[q + 2]] - snV[snQ[q]]).Cross(snV[snQ[q + 3]] - snV[snQ[q + 1]]).Len * 0.5;
+			if (a <= 0) break;
+			L = Math.Sqrt(a / target) * 1.06; // 전부 쿼드로 만들 때 조금 늘어나는 만큼
+		}
+		D = null; NT = null; outside = null; snV = null; snQ = null; snN = null; snAdjS = null; snAdj = null;
+		return L;
+	}
+
 	// ================================================================ 1. 입력 준비 / 날카로운 엣지
-	void Prepare(double sharpDeg, bool sharp)
+	int nPts;
+	void PrepareInput()
 	{
 		int nv = inXYZ.Count / 3;
+		nPts = nv;
 		P = new RV[nv];
 		for (int i = 0; i < nv; i++) P[i] = new RV(inXYZ[i * 3], inXYZ[i * 3 + 1], inXYZ[i * 3 + 2]);
 		nT = inTri.Count / 3;
@@ -198,6 +252,11 @@ public class RAQuad
 			TN[t] = (P[T[t * 3 + 1]] - P[T[t * 3]]).Cross(P[T[t * 3 + 2]] - P[T[t * 3]]).Norm();
 		triSharp = new byte[nT];
 		triOpen = new bool[nT];
+	}
+
+	void PrepareSharp(double sharpDeg, bool sharp)
+	{
+		int nv = nPts;
 
 		// 엣지 → 면 (오브젝트마다 버텍스가 따로라 섞이지 않음)
 		var edgeFaces = new Dictionary<long, int>(nT * 2, LongKey.I);   // 첫 면*4 + 엣지 번호, 두 번째부터는 별도
@@ -447,6 +506,7 @@ public class RAQuad
 
 	void BuildSurfaceNet()
 	{
+		snAdjS = null; snAdj = null;
 		var cellVert = new Dictionary<int, int>();
 		var verts = new List<RV>();
 		int sy = nx, sz = nx * ny;
@@ -575,7 +635,7 @@ public class RAQuad
 		int n = snV.Length;
 		ctag = new byte[n]; cdir = new RV[n]; cpos = new RV[n]; cpt = new RV[n];
 		if (!sharp) return;
-		double near = h * 0.35;
+		double near = h * 0.15;
 		For(n, v =>
 		{
 			int t; RV q; int reg;
@@ -621,9 +681,15 @@ public class RAQuad
 			}
 			double frac = (double)tagged / ring.Count;
 			// 합친 껍질 자체가 그 자리에서 꺾여야 함 (겹친 판 사이의 작은 턱은 무시)
-			double minDot = 1;
-			foreach (int w in ring) minDot = Math.Min(minDot, snN[v].Dot(snN[w]));
+			double minDot = 1, along = 0;
+			foreach (int w in ring)
+			{
+				minDot = Math.Min(minDot, snN[v].Dot(snN[w]));
+				along = Math.Max(along, Math.Abs(snN[w].Dot(cdir[v])));
+			}
 			if (minDot > shellCos) return;
+			// 곧은 모서리 주변 법선은 모서리 방향과 수직 (잔 장식처럼 사방으로 휘면 버림)
+			if (along > 0.45) return;
 			// 가장 큰 고유값 (거듭제곱법) / 전체 → 방향이 고른 정도
 			RV e = cdir[v];
 			for (int it = 0; it < 8; it++)
@@ -632,8 +698,9 @@ public class RAQuad
 			}
 			RV me = new RV(xx * e.X + xy * e.Y + xz * e.Z, xy * e.X + yy * e.Y + yz * e.Z, xz * e.X + yz * e.Y + zz * e.Z);
 			double coh = me.Len / Math.Max(1e-12, xx + yy + zz);
-			keep[v] = frac < 0.6 && coh > 0.8;
+			keep[v] = frac < 0.7 && coh > 0.8;
 		});
+		var preTag = (byte[])ctag.Clone();
 		for (int v = 0; v < n; v++) if (!keep[v]) ctag[v] = 0;
 		// 꼭짓점: 모서리 선이 크게 꺾이는 곳에서 가장 가까운 버텍스
 		FindCorners();
@@ -641,14 +708,15 @@ public class RAQuad
 		{
 			// 가까운 버텍스 (꼭짓점 수가 적어 전체에서 찾음), 주변에 살아남은 모서리 버텍스가 있어야 함
 			int best = -1; double bd = (r + h * 1.5) * (r + h * 1.5);
-			int support = 0; double sr2 = (L * 0.6) * (L * 0.6);
+			int support = 0, pre = 0; double sr2 = (L * 1.3) * (L * 1.3), pr2 = (L * 0.6) * (L * 0.6);
 			for (int v = 0; v < n; v++)
 			{
 				double d2 = (snV[v] - c).Len2;
 				if (d2 < bd) { bd = d2; best = v; }
 				if (d2 < sr2 && ctag[v] == 1) support++;
+				if (d2 < pr2 && preTag[v] != 0) pre++;
 			}
-			if (best < 0 || support < 3) continue;
+			if (best < 0 || support < 3 || pre < 2) continue;
 			ctag[best] = 2;
 			cpt[best] = c;
 			RV nn = snN[best];
@@ -674,6 +742,47 @@ public class RAQuad
 		if (l2 < 1e-30) return a;
 		double t = Math.Max(0, Math.Min(1, (p - a).Dot(ab) / l2));
 		return a + ab * t;
+	}
+
+	// 가이드 선 가까이(원래 표면 기준) 있는 버텍스를 모서리 선처럼 고정: 방향 = 선 방향, 격자선이 선을 지나게
+	int TagGuides()
+	{
+		BuildSnAdj();
+		int n = snV.Length;
+		double tol = Math.Max(h * 0.7, L * 0.3);
+		int cnt = 0;
+		var hit = new bool[n];
+		For(n, v =>
+		{
+			int t; RV q; int reg;
+			if (!Nearest(snV[v], out t, out q, out reg)) q = snV[v];
+			double best = tol * tol; RV bp = RV.Zero, bd = RV.Zero; bool found = false;
+			for (int g = 0; g < guides.Count; g++)
+			{
+				var gp = guides[g]; var gn = guideN[g];
+				for (int k = 0; k + 1 < gp.Length; k++)
+				{
+					RV a = gp[k], b = gp[k + 1];
+					RV cp = ClosestOnSeg(q, a, b);
+					double d2 = (cp - q).Len2;
+					if (d2 >= best) continue;
+					// 판의 반대쪽 면에 붙지 않게: 선을 그은 면의 법선과 같은 쪽
+					RV ng = gn[k] + gn[k + 1];
+					if (ng.Len2 > 1e-12 && ng.Dot(snN[v]) < 0.2) continue;
+					best = d2; bp = cp; bd = b - a; found = true;
+				}
+			}
+			if (!found) return;
+			RV nrm = snN[v];
+			RV td = bd - nrm * bd.Dot(nrm);
+			if (td.Len2 < 1e-20) return;
+			ctag[v] = 1;
+			cdir[v] = td.Norm();
+			cpos[v] = bp + nrm * (snV[v] - bp).Dot(nrm);
+			hit[v] = true;
+		});
+		foreach (bool b in hit) if (b) cnt++;
+		return cnt;
 	}
 
 	// 입력의 날카로운 엣지 선에서 엣지 길이 규모로 크게 꺾이는 점 (날개 끝 같은 곳)
@@ -1074,6 +1183,37 @@ public class RAQuad
 		err = best;
 	}
 
+	// CompatPos 와 같되 정수 좌표 없이 (위치장 반복용, 가장 많이 불림)
+	static void CompatPosFast(RV p0, RV n0, RV q0, RV o0, RV p1, RV n1, RV q1, RV o1, double s, double inv, out RV ra, out RV rb)
+	{
+		RV t0 = n0.Cross(q0), t1 = n1.Cross(q1);
+		RV mid = MiddlePoint(p0, n0, p1, n1);
+		RV d0 = mid - o0, d1 = mid - o1;
+		double a0 = Math.Floor(q0.Dot(d0) * inv), b0 = Math.Floor(t0.Dot(d0) * inv);
+		double a1 = Math.Floor(q1.Dot(d1) * inv), b1 = Math.Floor(t1.Dot(d1) * inv);
+		// 두 격자 칸 모서리 4개씩: 원점 기준 좌표 (q, t 성분을 3차원으로)
+		RV o0p = o0 + q0 * (a0 * s) + t0 * (b0 * s);
+		RV o1p = o1 + q1 * (a1 * s) + t1 * (b1 * s);
+		RV qs0 = q0 * s, ts0 = t0 * s, qs1 = q1 * s, ts1 = t1 * s;
+		RV c0 = o0p, c1 = o0p + qs0, c2 = o0p + ts0, c3 = c1 + ts0;
+		RV e0 = o1p, e1 = o1p + qs1, e2 = o1p + ts1, e3 = e1 + ts1;
+		double best = double.MaxValue; RV ba = c0, bb = e0;
+		Try(c0, e0, e1, e2, e3, ref best, ref ba, ref bb);
+		Try(c1, e0, e1, e2, e3, ref best, ref ba, ref bb);
+		Try(c2, e0, e1, e2, e3, ref best, ref ba, ref bb);
+		Try(c3, e0, e1, e2, e3, ref best, ref ba, ref bb);
+		ra = ba; rb = bb;
+	}
+
+	static void Try(RV a, RV e0, RV e1, RV e2, RV e3, ref double best, ref RV ba, ref RV bb)
+	{
+		double d;
+		d = (a.X - e0.X) * (a.X - e0.X) + (a.Y - e0.Y) * (a.Y - e0.Y) + (a.Z - e0.Z) * (a.Z - e0.Z); if (d < best) { best = d; ba = a; bb = e0; }
+		d = (a.X - e1.X) * (a.X - e1.X) + (a.Y - e1.Y) * (a.Y - e1.Y) + (a.Z - e1.Z) * (a.Z - e1.Z); if (d < best) { best = d; ba = a; bb = e1; }
+		d = (a.X - e2.X) * (a.X - e2.X) + (a.Y - e2.Y) * (a.Y - e2.Y) + (a.Z - e2.Z) * (a.Z - e2.Z); if (d < best) { best = d; ba = a; bb = e2; }
+		d = (a.X - e3.X) * (a.X - e3.X) + (a.Y - e3.Y) * (a.Y - e3.Y) + (a.Z - e3.Z) * (a.Z - e3.Z); if (d < best) { best = d; ba = a; bb = e3; }
+	}
+
 	void SolvePosition(double scale)
 	{
 		double inv = 1.0 / scale;
@@ -1110,8 +1250,8 @@ public class RAQuad
 						{
 							int j = l.adj[e];
 							double w = 1;
-							RV a, b; int x0, y0, x1, y1; double err;
-							CompatPos(v, n, q, sum, l.V[j], l.N[j], l.Q[j], l.O[j], scale, inv, out a, out b, out x0, out y0, out x1, out y1, out err);
+							RV a, b;
+							CompatPosFast(v, n, q, sum, l.V[j], l.N[j], l.Q[j], l.O[j], scale, inv, out a, out b);
 							sum = a * ws + b * w;
 							ws += w;
 							if (ws > 1e-20) sum = sum / ws;
@@ -1738,13 +1878,14 @@ public class RAQuad
 		foreach (var kv in ec)
 			if (kv.Value == 1) { boundary[(int)(kv.Key >> 32)] = true; boundary[(int)(kv.Key & 0xffffffff)] = true; }
 		var pos = mV.ToArray();
-		var nrm = mN.ToArray();
-		var feat = new byte[n];     // 투영 결과 모서리 위
-		// 처음 투영: 모서리 버텍스는 가까운 날카로운 엣지로
-		For(n, v => { pos[v] = Project(pos[v], mC[v], out nrm[v], out feat[v]); if (mC[v] == 2) pos[v] = mCP[v]; });
+		var nrm = new RV[n];
+		MeshNormals(pos, nrm);
+		// 처음 투영 (꼭짓점은 제자리)
+		For(n, v => { pos[v] = mC[v] == 2 ? mCP[v] : ProjectClosed(pos[v], nrm[v]); });
 		var np = new RV[n];
 		for (int it = 0; it < RelaxIters; it++)
 		{
+			MeshNormals(pos, nrm);
 			For(n, v =>
 			{
 				if (mC[v] == 2 || boundary[v]) { np[v] = pos[v]; return; }
@@ -1762,9 +1903,65 @@ public class RAQuad
 				if (mC[v] == 0) d = d - nrm[v] * d.Dot(nrm[v]);
 				np[v] = pos[v] + d * 0.5;
 			});
-			For(n, v => { pos[v] = mC[v] == 2 ? mCP[v] : Project(np[v], mC[v], out nrm[v], out feat[v]); });
+			For(n, v => { pos[v] = mC[v] == 2 ? mCP[v] : ProjectClosed(np[v], nrm[v]); });
 		}
 		for (int v = 0; v < n; v++) mV[v] = pos[v];
+	}
+
+	void MeshNormals(RV[] pos, RV[] nrm)
+	{
+		for (int v = 0; v < nrm.Length; v++) nrm[v] = RV.Zero;
+		foreach (var f in mF)
+		{
+			RV c = RV.Zero;
+			foreach (int v in f) c = c + pos[v];
+			c = c / f.Length;
+			RV fn = RV.Zero;
+			for (int k = 0; k < f.Length; k++) fn = fn + (pos[f[k]] - c).Cross(pos[f[(k + 1) % f.Length]] - c);
+			foreach (int v in f) nrm[v] = nrm[v] + fn;
+		}
+		for (int v = 0; v < nrm.Length; v++) nrm[v] = nrm[v].Norm();
+	}
+
+	double DistAt(RV p)
+	{
+		int t; RV q; int reg;
+		if (!Nearest(p, out t, out q, out reg)) return r * 4;
+		return (p - q).Len;
+	}
+
+	// 닫힌 표면(부푼 껍질을 다시 r 만큼 줄인 면: 좁은 틈·홈은 메우고 볼록한 모서리는 그대로)으로 투영
+	//  - 가장 가까운 원래 표면 점에 바깥에서 반지름 r 공이 닿을 수 있으면 그 점
+	//  - 아니면 (틈 안) 법선 방향으로 공이 들어갈 수 있는 높이까지 띄움
+	RV ProjectClosed(RV p, RV n)
+	{
+		int t; RV q; int reg;
+		if (!Nearest(p, out t, out q, out reg)) return p;
+		if (n.Len2 < 0.5) return q;
+		RV u = p - q;
+		double ul = u.Len;
+		// 공 중심 방향: 바깥쪽이면 q→p, 안쪽이거나 너무 가까우면 메쉬 법선
+		RV dir = (ul > r * 0.05 && u.Dot(n) > 0) ? (u / ul + n).Norm() : n;
+		if (DistAt(q + dir * r) >= r * 0.9) return q;
+		// 틈: p + n t 에서 거리 r 이 되는 첫 t 를 찾아 (공 중심) 그 아래 r
+		double lo = -r, hi = -r;
+		double step = r * 0.35;
+		bool found = false;
+		for (int k = 0; k < 14; k++)
+		{
+			hi = -r + step * (k + 1);
+			if (DistAt(p + n * hi) >= r) { found = true; break; }
+			lo = hi;
+		}
+		if (!found) return p;
+		for (int k = 0; k < 6; k++)
+		{
+			double mid = (lo + hi) * 0.5;
+			if (DistAt(p + n * mid) >= r) hi = mid; else lo = mid;
+		}
+		// 너무 멀리 띄우지 않음 (얇은 틈 위에서 튀는 것 방지)
+		double off = Math.Max(-r, Math.Min(r, hi - r));
+		return p + n * off;
 	}
 
 	// 가장 가까운 원래 표면으로. c != 0 이면 가까운 날카로운 엣지 위로
@@ -1829,5 +2026,38 @@ public class RAQuad
 		return res;
 	}
 	public int[] DebugSurfaceNetQuads() { return snQ; }
+
+	// ---------------------------------------------------------------- MaxScript 용
+	public float[] GetVerts() { return OutVerts; }
+	public int[] GetCounts() { return OutCounts; }
+	public int[] GetIdx() { return OutIdx; }
+	public string GetLog() { return Log; }
+
+	// 면을 부채꼴 삼각형으로 (1 기반). 안쪽 엣지는 GetTriHidden 비트로 (1:ab 2:bc 4:ca)
+	public int[] GetTris()
+	{
+		var res = new List<int>();
+		int o = 0;
+		foreach (int c in OutCounts)
+		{
+			for (int k = 1; k + 1 < c; k++) { res.Add(OutIdx[o] + 1); res.Add(OutIdx[o + k] + 1); res.Add(OutIdx[o + k + 1] + 1); }
+			o += c;
+		}
+		return res.ToArray();
+	}
+
+	public int[] GetTriHidden()
+	{
+		var res = new List<int>();
+		foreach (int c in OutCounts)
+			for (int k = 1; k + 1 < c; k++)
+			{
+				int b = 0;
+				if (k > 1) b |= 1;
+				if (k + 2 < c) b |= 4;
+				res.Add(b);
+			}
+		return res.ToArray();
+	}
 	public byte[] DebugTags() { return ctag; }
 }

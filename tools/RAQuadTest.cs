@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Diagnostics;
+using System.Linq;
 
 static class RAQuadTest
 {
@@ -47,8 +48,31 @@ static class RAQuadTest
 			q.AddMesh(v.ToArray(), t.ToArray());
 		}
 		Console.WriteLine("load {0:0.00}s", sw.Elapsed.TotalSeconds);
+		// GUIDES=파일: 줄마다 "x y z nx ny nz", 빈 줄로 선 구분
+		string gf = Environment.GetEnvironmentVariable("GUIDES");
+		if (gf != null)
+		{
+			var pts = new List<float>(); var nrm = new List<float>();
+			foreach (var line in File.ReadAllLines(gf).Concat(new[] { "" }))
+			{
+				var p = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+				if (p.Length < 6) { if (pts.Count > 0) q.AddGuide(pts.ToArray(), nrm.ToArray()); pts.Clear(); nrm.Clear(); continue; }
+				for (int i = 0; i < 3; i++) pts.Add(float.Parse(p[i]));
+				for (int i = 3; i < 6; i++) nrm.Add(float.Parse(p[i]));
+			}
+		}
 		string res = q.Run(edge, sharp, flags, 0);
 		Console.Write(q.Log);
+		// 같은 엔진으로 면 수만 바꿔 다시 (Max 의 +/− 와 같음)
+		string rerun = Environment.GetEnvironmentVariable("RERUN");
+		if (rerun != null)
+			foreach (var tf in rerun.Split(','))
+			{
+				q.TargetFaces = int.Parse(tf);
+				var sw2 = Stopwatch.StartNew();
+				res = q.Run(edge, sharp, flags, 0);
+				Console.WriteLine("rerun target {0}: {1}  faces {2}  {3:0.00}s", tf, res, q.OutCounts.Length, sw2.Elapsed.TotalSeconds);
+			}
 		Console.WriteLine(res);
 		using (var w = new StreamWriter(outPath))
 		{
