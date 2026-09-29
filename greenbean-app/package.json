@@ -1,0 +1,12 @@
+{
+  "name": "greenbean-app",
+  "private": true,
+  "description": "생두 알리미 — 간편 실행 (서버 + 앱)",
+  "scripts": {
+    "start": "node scripts/launch.mjs",
+    "demo": "node scripts/launch.mjs --demo",
+    "server": "node scripts/launch.mjs --server",
+    "setup:kakao": "node scripts/setup-kakao.mjs",
+    "test": "npm --prefix server test && node --test \"scripts/*.test.mjs\""
+  }
+}
