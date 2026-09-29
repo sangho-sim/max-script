@@ -1,0 +1,20 @@
+{
+  "name": "greenbean-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "국내 생두 쇼핑몰 미러링 서버 (크롤링 · 검색 API · 카카오톡 신규 입고 알림)",
+  "type": "module",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "demo": "node src/server.js --demo",
+    "crawl": "node src/cli.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "express": "^5.2.1"
+  }
+}
