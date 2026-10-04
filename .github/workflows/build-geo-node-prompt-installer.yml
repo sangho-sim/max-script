@@ -1,0 +1,65 @@
+name: Build Geo Node Prompt installer
+
+on:
+  push:
+    paths:
+      - "geo_node_prompt/**"
+      - "geo_node_prompt_installer/**"
+      - ".github/workflows/build-geo-node-prompt-installer.yml"
+  pull_request:
+    paths:
+      - "geo_node_prompt/**"
+      - "geo_node_prompt_installer/**"
+      - ".github/workflows/build-geo-node-prompt-installer.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: python -m pip install pyinstaller pytest
+
+      - name: Test install logic
+        run: python -m pytest -q -p no:cacheprovider geo_node_prompt_installer
+
+      - name: Build GeoNodePrompt_Setup.exe
+        run: >
+          pyinstaller --noconfirm --onefile --windowed
+          --name GeoNodePrompt_Setup
+          --add-data "geo_node_prompt;geo_node_prompt"
+          --exclude-module pytest
+          geo_node_prompt_installer/setup_gui.py
+
+      - name: Smoke test (silent install / uninstall into a fake APPDATA)
+        shell: pwsh
+        run: |
+          $fake = Join-Path $env:RUNNER_TEMP "appdata"
+          $ver = Join-Path $fake "Blender Foundation\Blender\4.2"
+          New-Item -ItemType Directory -Force $ver | Out-Null
+          $env:APPDATA = $fake
+          $p = Start-Process dist\GeoNodePrompt_Setup.exe -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "/S exit code $($p.ExitCode)" }
+          $init = Join-Path $ver "scripts\addons\geo_node_prompt\__init__.py"
+          if (-not (Test-Path $init)) { throw "add-on not installed" }
+          Get-ChildItem (Split-Path $init) | Select-Object -ExpandProperty Name
+          $p = Start-Process dist\GeoNodePrompt_Setup.exe -ArgumentList "/U" -Wait -PassThru
+          if (Test-Path $init) { throw "add-on not removed" }
+
+      - name: Collect files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory out | Out-Null
+          Copy-Item dist\GeoNodePrompt_Setup.exe out\
+          Copy-Item geo_node_prompt_installer\README.txt "out\GeoNodePrompt_사용법.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GeoNodePrompt_Setup
+          path: out/
