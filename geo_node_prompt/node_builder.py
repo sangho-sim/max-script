@@ -17,6 +17,13 @@ def _new_interface_socket(tree, name, in_out, socket_type):
     return tree.interface.new_socket(name=name, in_out=in_out, socket_type=socket_type)
 
 
+def _socket_key(key):
+    """JSON 은 dict 키를 항상 문자열로 만들므로 "0" 같은 키는 인덱스로 바꾼다."""
+    if isinstance(key, str) and key.isdigit():
+        return int(key)
+    return key
+
+
 def _apply_exposed_input_bounds(item, spec):
     if "default" in spec and spec["default"] is not None:
         try:
@@ -83,7 +90,7 @@ def build_node_tree(spec, obj, warnings=None):
                 warnings.append("노드 '{}' 속성 '{}' 설정 실패: {}".format(node_id, attr, exc))
         for socket_key, value in (node_spec.get("defaults") or {}).items():
             try:
-                node.inputs[socket_key].default_value = value
+                node.inputs[_socket_key(socket_key)].default_value = value
             except Exception as exc:  # noqa: BLE001
                 warnings.append("노드 '{}' 입력 '{}' 기본값 설정 실패: {}".format(node_id, socket_key, exc))
         node_map[node_id] = node
@@ -95,8 +102,8 @@ def build_node_tree(spec, obj, warnings=None):
             warnings.append("링크의 노드를 찾을 수 없습니다: {}".format(link_spec))
             continue
         try:
-            from_socket = from_node.outputs[link_spec["from_socket"]]
-            to_socket = to_node.inputs[link_spec["to_socket"]]
+            from_socket = from_node.outputs[_socket_key(link_spec["from_socket"])]
+            to_socket = to_node.inputs[_socket_key(link_spec["to_socket"])]
             tree.links.new(from_socket, to_socket)
         except Exception as exc:  # noqa: BLE001
             warnings.append("링크 생성 실패 {}: {}".format(link_spec, exc))

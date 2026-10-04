@@ -86,14 +86,18 @@ def validate_spec(spec):
 
     node_ids = set()
     for node in nodes:
-        if "id" not in node or "type" not in node:
+        if not isinstance(node, dict) or "id" not in node or "type" not in node:
             raise ValueError("노드에 'id' 또는 'type'이 없습니다.")
         if node["type"] not in ALLOWED_NODE_TYPES:
             raise ValueError("허용되지 않은 노드 타입: {}".format(node["type"]))
+        if node["id"] in node_ids or node["id"] in ("GROUP_INPUT", "GROUP_OUTPUT"):
+            raise ValueError("중복되거나 예약된 노드 id: {}".format(node["id"]))
         node_ids.add(node["id"])
 
     valid_ids = node_ids | {"GROUP_INPUT", "GROUP_OUTPUT"}
     for link in links:
+        if not isinstance(link, dict):
+            raise ValueError("링크가 JSON 객체가 아닙니다.")
         for key in ("from_node", "from_socket", "to_node", "to_socket"):
             if key not in link:
                 raise ValueError("링크에 '{}' 항목이 없습니다.".format(key))
@@ -103,6 +107,8 @@ def validate_spec(spec):
             raise ValueError("알 수 없는 to_node: {}".format(link["to_node"]))
 
     for exposed in spec.get("exposed_inputs", []) or []:
+        if not isinstance(exposed, dict) or "name" not in exposed:
+            raise ValueError("exposed_inputs 항목에 'name'이 없습니다.")
         if exposed.get("socket_type") not in ALLOWED_SOCKET_TYPES:
             raise ValueError("허용되지 않은 socket_type: {}".format(exposed.get("socket_type")))
 
