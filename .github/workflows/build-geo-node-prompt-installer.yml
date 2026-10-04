@@ -19,23 +19,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install build tools
-        run: python -m pip install pyinstaller pytest
-
-      - name: Test install logic
-        run: python -m pytest -q -p no:cacheprovider geo_node_prompt_installer
-
       - name: Build GeoNodePrompt_Setup.exe
-        run: >
-          pyinstaller --noconfirm --onefile --windowed
-          --name GeoNodePrompt_Setup
-          --add-data "geo_node_prompt;geo_node_prompt"
-          --exclude-module pytest
-          geo_node_prompt_installer/setup_gui.py
+        shell: bash
+        run: geo_node_prompt_installer/build.sh
 
       - name: Smoke test (silent install / uninstall into a fake APPDATA)
         shell: pwsh
@@ -52,14 +38,9 @@ jobs:
           $p = Start-Process dist\GeoNodePrompt_Setup.exe -ArgumentList "/U" -Wait -PassThru
           if (Test-Path $init) { throw "add-on not removed" }
 
-      - name: Collect files
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory out | Out-Null
-          Copy-Item dist\GeoNodePrompt_Setup.exe out\
-          Copy-Item geo_node_prompt_installer\README.txt "out\GeoNodePrompt_사용법.txt"
-
       - uses: actions/upload-artifact@v4
         with:
           name: GeoNodePrompt_Setup
-          path: out/
+          path: |
+            dist/GeoNodePrompt_Setup.exe
+            dist/GeoNodePrompt_사용법.txt
