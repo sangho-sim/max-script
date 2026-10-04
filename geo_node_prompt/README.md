@@ -80,3 +80,14 @@
   원본 지오메트리 자체)를 인스턴스로 쓴다 (`scatter`는 원본 메쉬를 유지한 채
   그 위에 인스턴스를 얹는다) — 실제 사용할 오브젝트로 바꾸려면
   생성된 노드 트리를 열어 해당 노드를 직접 교체하면 된다.
+
+## 테스트
+
+Blender 없이 `bpy` 스텁(`tests/geo_node_prompt_tests/bpy_stub.py`)으로 템플릿 매칭,
+스펙 검증, AI 백엔드(네트워크는 목 처리), 노드 트리 조립, 오퍼레이터 흐름을 테스트한다.
+GitHub Actions(`.github/workflows/geo-node-prompt-tests.yml`)가 push/PR 마다 실행한다.
+
+```
+python -m pip install pytest
+python -m pytest tests/geo_node_prompt_tests
+```
