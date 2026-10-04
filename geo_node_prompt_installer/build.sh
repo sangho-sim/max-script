@@ -23,9 +23,11 @@ if command -v mcs >/dev/null; then
 	mcs -target:winexe -optimize+ -codepage:utf8 $REFS \
 		-resource:obj/geo_node_prompt.zip,geo_node_prompt.zip -out:dist/GeoNodePrompt_Setup.exe $SRC
 else
+	# Git Bash 가 인자를 경로로 바꾸지 않게 하고, csc 에는 Windows 식 경로를 줌
 	CSC=/c/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe
-	"$CSC" -nologo -target:winexe -optimize+ -codepage:65001 $REFS \
-		-resource:obj/geo_node_prompt.zip,geo_node_prompt.zip -out:dist/GeoNodePrompt_Setup.exe $SRC
+	MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$CSC" -nologo -target:winexe -optimize+ -codepage:65001 $REFS \
+		'-resource:obj\geo_node_prompt.zip,geo_node_prompt.zip' '-out:dist\GeoNodePrompt_Setup.exe' \
+		'geo_node_prompt_installer\GeoNodePromptSetup.cs'
 fi
 cp geo_node_prompt_installer/README.txt "dist/GeoNodePrompt_사용법.txt"
 echo "dist/GeoNodePrompt_Setup.exe 완료"
