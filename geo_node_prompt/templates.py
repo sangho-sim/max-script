@@ -38,8 +38,9 @@ def _noise_displace_spec(prompt):
         "exposed_inputs": [
             {"name": "Strength", "socket_type": "NodeSocketFloat",
              "default": 0.2, "min": 0.0, "max": 5.0},
+            # 정수 배율이면 기본 큐브/그리드 정점이 노이즈 격자점에 딱 맞아 평평해진다.
             {"name": "Scale", "socket_type": "NodeSocketFloat",
-             "default": 5.0, "min": 0.0, "max": 100.0},
+             "default": 4.3, "min": 0.0, "max": 100.0},
         ],
         "nodes": [
             {"id": "normal", "type": "GeometryNodeInputNormal", "location": (-200, 200)},
@@ -85,9 +86,10 @@ def _scatter_instances_spec(prompt):
             {"id": "scale_rand", "type": "FunctionNodeRandomValue", "location": (0, 50),
              "props": {"data_type": "FLOAT"}},
             {"id": "combine_scale", "type": "ShaderNodeCombineXYZ", "location": (200, 50)},
-            {"id": "instance_src", "type": "GeometryNodeMeshPrimitiveIcoSphere", "location": (0, -150),
+            {"id": "instance_src", "type": "GeometryNodeMeshIcoSphere", "location": (0, -150),
              "defaults": {"Radius": 0.05, "Subdivisions": 1}},
             {"id": "instance", "type": "GeometryNodeInstanceOnPoints", "location": (400, 150)},
+            {"id": "join", "type": "GeometryNodeJoinGeometry", "location": (600, 0)},
         ],
         "links": [
             {"from_node": "GROUP_INPUT", "from_socket": "Geometry", "to_node": "distribute", "to_socket": "Mesh"},
@@ -102,7 +104,9 @@ def _scatter_instances_spec(prompt):
             {"from_node": "instance_src", "from_socket": "Mesh", "to_node": "instance", "to_socket": "Instance"},
             {"from_node": "rot_rand", "from_socket": "Value", "to_node": "instance", "to_socket": "Rotation"},
             {"from_node": "combine_scale", "from_socket": "Vector", "to_node": "instance", "to_socket": "Scale"},
-            {"from_node": "instance", "from_socket": "Instances", "to_node": "GROUP_OUTPUT", "to_socket": "Geometry"},
+            {"from_node": "GROUP_INPUT", "from_socket": "Geometry", "to_node": "join", "to_socket": "Geometry"},
+            {"from_node": "instance", "from_socket": "Instances", "to_node": "join", "to_socket": "Geometry"},
+            {"from_node": "join", "from_socket": "Geometry", "to_node": "GROUP_OUTPUT", "to_socket": "Geometry"},
         ],
     }
 
@@ -175,7 +179,8 @@ def _boolean_cut_spec(prompt):
             {"name": "Cutter Object", "socket_type": "NodeSocketObject", "default": None},
         ],
         "nodes": [
-            {"id": "objinfo", "type": "GeometryNodeObjectInfo", "location": (-200, -100)},
+            {"id": "objinfo", "type": "GeometryNodeObjectInfo", "location": (-200, -100),
+             "props": {"transform_space": "RELATIVE"}},
             {"id": "boolean", "type": "GeometryNodeMeshBoolean", "location": (0, 0),
              "props": {"operation": "DIFFERENCE"}},
         ],

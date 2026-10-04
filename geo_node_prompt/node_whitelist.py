@@ -27,12 +27,12 @@ ALLOWED_NODE_TYPES = {
     "GeometryNodeDuplicateElements",
     "GeometryNodeMeshLine",
     # 1차 도형
-    "GeometryNodeMeshPrimitiveCube",
-    "GeometryNodeMeshPrimitiveUVSphere",
-    "GeometryNodeMeshPrimitiveIcoSphere",
-    "GeometryNodeMeshPrimitiveCylinder",
-    "GeometryNodeMeshPrimitiveCone",
-    "GeometryNodeMeshPrimitiveGrid",
+    "GeometryNodeMeshCube",
+    "GeometryNodeMeshUVSphere",
+    "GeometryNodeMeshIcoSphere",
+    "GeometryNodeMeshCylinder",
+    "GeometryNodeMeshCone",
+    "GeometryNodeMeshGrid",
     # 입력/유틸리티
     "GeometryNodeObjectInfo",
     "GeometryNodeInputPosition",
