@@ -8,6 +8,7 @@
 - `installer/` — 원래 설치 프로그램(1.5)과 리소스 교체 도구, 사용법(README.txt)
 - `tools/RAQuadTest.cs` — OBJ 로 엔진을 돌려 보는 테스트 프로그램
 - `dist/` — 빌드 결과 (`RetopoAnnotate_Setup.exe`)
+- `geo_node_prompt/` — (별도 프로젝트) 프롬프트로 지오메트리 노드 구조를 생성하는 Blender 애드온, 자세한 내용은 해당 폴더의 README 참고
 
 빌드: `./build.sh <Mono.Cecil.dll>` (mono 필요)
 
