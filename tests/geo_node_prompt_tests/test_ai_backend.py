@@ -37,6 +37,35 @@ def test_validate_rejects_node_without_id():
         validate_spec(_spec(nodes=[{"type": "GeometryNodeSetPosition"}]))
 
 
+@pytest.mark.parametrize("node_id", ["GROUP_INPUT", "GROUP_OUTPUT"])
+def test_validate_rejects_reserved_node_id(node_id):
+    spec = _spec()
+    spec["nodes"][0]["id"] = node_id
+    with pytest.raises(ValueError, match=node_id):
+        validate_spec(spec)
+
+
+def test_validate_rejects_duplicate_node_id():
+    spec = _spec()
+    spec["nodes"][1]["id"] = spec["nodes"][0]["id"]
+    with pytest.raises(ValueError, match=spec["nodes"][0]["id"]):
+        validate_spec(spec)
+
+
+@pytest.mark.parametrize("key", ["nodes", "links", "exposed_inputs"])
+def test_validate_rejects_non_dict_entries(key):
+    spec = _spec()
+    spec[key] = spec[key] + ["oops"]
+    with pytest.raises(ValueError):
+        validate_spec(spec)
+
+
+def test_validate_rejects_exposed_input_without_name():
+    spec = _spec(exposed_inputs=[{"socket_type": "NodeSocketFloat"}])
+    with pytest.raises(ValueError, match="name"):
+        validate_spec(spec)
+
+
 def test_validate_rejects_disallowed_node_type():
     spec = _spec()
     spec["nodes"][0]["type"] = "GeometryNodeEvilScript"

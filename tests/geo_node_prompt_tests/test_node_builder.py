@@ -45,7 +45,7 @@ def test_exposed_input_bounds_applied():
 def test_props_and_defaults_applied():
     spec = next(t for t in TEMPLATES if t["id"] == "scatter")["builder"]("")
     tree, _ = build_node_tree(spec, bpy_stub.Object("Cube"))
-    ico = _node_by_type(tree, "GeometryNodeMeshPrimitiveIcoSphere")
+    ico = _node_by_type(tree, "GeometryNodeMeshIcoSphere")
     assert ico.inputs["Radius"].default_value == 0.05
     distribute = _node_by_type(tree, "GeometryNodeDistributePointsOnFaces")
     assert distribute.distribute_method == "RANDOM"
@@ -85,3 +85,23 @@ def test_default_name_and_modifier_name_truncated():
     spec["name"] = "x" * 100
     _, modifier = build_node_tree(spec, bpy_stub.Object("Cube"))
     assert len(modifier.name) == 63
+
+
+def test_digit_string_socket_keys_are_indices():
+    # JSON 으로 왕복한 스펙은 defaults 키가 "1" 같은 문자열이 된다.
+    spec = {
+        "name": "Digits",
+        "exposed_inputs": [],
+        "nodes": [{"id": "math", "type": "ShaderNodeMath", "defaults": {"1": 2.5}}],
+        "links": [
+            {"from_node": "GROUP_INPUT", "from_socket": "Geometry", "to_node": "GROUP_OUTPUT", "to_socket": "0"},
+            {"from_node": "math", "from_socket": "0", "to_node": "math", "to_socket": "0"},
+        ],
+    }
+    warnings = []
+    tree, _ = build_node_tree(spec, bpy_stub.Object("Cube"), warnings)
+    assert warnings == []
+    math = _node_by_type(tree, "ShaderNodeMath")
+    assert math.inputs[1].default_value == 2.5
+    group_output = _node_by_type(tree, "NodeGroupOutput")
+    assert tree.links[0].to_socket is group_output.inputs["Geometry"]
