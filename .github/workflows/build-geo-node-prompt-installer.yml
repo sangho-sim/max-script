@@ -1,0 +1,46 @@
+name: Build Geo Node Prompt installer
+
+on:
+  push:
+    paths:
+      - "geo_node_prompt/**"
+      - "geo_node_prompt_installer/**"
+      - ".github/workflows/build-geo-node-prompt-installer.yml"
+  pull_request:
+    paths:
+      - "geo_node_prompt/**"
+      - "geo_node_prompt_installer/**"
+      - ".github/workflows/build-geo-node-prompt-installer.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build GeoNodePrompt_Setup.exe
+        shell: bash
+        run: geo_node_prompt_installer/build.sh
+
+      - name: Smoke test (silent install / uninstall into a fake APPDATA)
+        shell: pwsh
+        run: |
+          $fake = Join-Path $env:RUNNER_TEMP "appdata"
+          $ver = Join-Path $fake "Blender Foundation\Blender\4.2"
+          New-Item -ItemType Directory -Force $ver | Out-Null
+          $env:APPDATA = $fake
+          $p = Start-Process dist\GeoNodePrompt_Setup.exe -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "/S exit code $($p.ExitCode)" }
+          $init = Join-Path $ver "scripts\addons\geo_node_prompt\__init__.py"
+          if (-not (Test-Path $init)) { throw "add-on not installed" }
+          Get-ChildItem (Split-Path $init) | Select-Object -ExpandProperty Name
+          $p = Start-Process dist\GeoNodePrompt_Setup.exe -ArgumentList "/U" -Wait -PassThru
+          if (Test-Path $init) { throw "add-on not removed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GeoNodePrompt_Setup
+          path: |
+            dist/GeoNodePrompt_Setup.exe
+            dist/GeoNodePrompt_사용법.txt
