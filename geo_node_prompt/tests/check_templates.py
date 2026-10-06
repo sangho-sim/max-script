@@ -171,12 +171,18 @@ def check_operators():
             {"from_node": "setpos", "from_socket": "Geometry", "to_node": "GROUP_OUTPUT", "to_socket": "Geometry"},
         ],
     }
-    fake_body = json.dumps({"content": [{"type": "text", "text": "```json\n" + json.dumps(ai_spec) + "\n```"}]})
-    fake_response = mock.MagicMock()
-    fake_response.__enter__.return_value = io.BytesIO(fake_body.encode("utf-8"))
+    def fake_response(payload):
+        response = mock.MagicMock()
+        response.__enter__.return_value = io.BytesIO(json.dumps(payload).encode("utf-8"))
+        return response
+
+    # 1차 호출(레시피 고르기)은 "맞는 레시피 없음", 2차 호출이 노드 스펙
+    no_recipe = fake_response({"content": [{"type": "tool_use", "name": "choose_recipes", "id": "t",
+                                            "input": {"recipes": []}}]})
+    spec_text = fake_response({"content": [{"type": "text", "text": "```json\n" + json.dumps(ai_spec) + "\n```"}]})
     settings.mode = "AI"
     settings.prompt = "x 위치에 따라 기울여줘"
-    with mock.patch("urllib.request.urlopen", return_value=fake_response) as urlopen:
+    with mock.patch("urllib.request.urlopen", side_effect=[no_recipe, spec_text]) as urlopen:
         result = bpy.ops.geo_node_prompt.generate()
     if result != {"FINISHED"} or not urlopen.called:
         problems.append("AI generate failed: {}".format(settings.last_status))

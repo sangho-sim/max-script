@@ -2,10 +2,10 @@
 bl_info = {
     "name": "Geo Node Prompt",
     "author": "max-script",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Geo Prompt",
-    "description": "자연어 프롬프트로 지오메트리 노드 구조를 생성 (오프라인 규칙 + 선택적 Claude API 하이브리드)",
+    "description": "한글 키워드(문어다리, 나선, 사슬 ...)로 지오메트리 노드를 생성 (튜토리얼식 레시피 + 선택적 Claude API)",
     "category": "Node",
 }
 
